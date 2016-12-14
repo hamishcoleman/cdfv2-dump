@@ -1,0 +1,3 @@
+[submodule "lib/HC"]
+	path = lib/HC
+	url = https://github.com/hamishcoleman/libhc-perl

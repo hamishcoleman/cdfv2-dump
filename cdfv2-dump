@@ -177,7 +177,7 @@ sub _validate {
     $header->{sectDifStart} == 0xFFFFFFFE || die("Unsupported larger Dif");
 
     my $sector_size = 2**$header->{SectorShift};
-    $self->{sector} = Sector::FH->new($self->{fh},512,$sector_size);
+    $self->{_sector} = Sector::FH->new($self->{fh},512,$sector_size);
 
     return $self;
 }
@@ -187,12 +187,11 @@ sub _read_sat {
     my $sat;
 
     for my $secno (@{$self->{header}{sectFat}}) {
-        $sat .= $self->{sector}->read($secno);
+        $sat .= $self->{_sector}->read($secno);
     }
     my @sat = unpack('V*',$sat);
-    $self->{sat_raw} = \@sat;
 
-    $self->{sat} = _unpack_chains(@sat);
+    $self->{_sat} = _unpack_chains(@sat);
 
     return $self;
 }
@@ -265,8 +264,8 @@ sub _read_satchain {
         die("Unexpected size");
     }
 
-    my $sector_size = $self->{sector}{sector_size};
-    my $sector = Sector::SectorList->new($sector_size,$self->{sector},$sector_list);
+    my $sector_size = $self->{_sector}{sector_size};
+    my $sector = Sector::SectorList->new($sector_size,$self->{_sector},$sector_list);
 
     return $sector->readall();
 }
@@ -275,10 +274,10 @@ sub _read_minifat {
     my $self = shift;
     my $startsec = $self->{header}{sectMiniFatStart};
     my $expected_sectors = $self->{header}{sectMiniFatCount};
-    my $raw = $self->_read_satchain($self->{sat}{$startsec},$expected_sectors);
+    my $raw = $self->_read_satchain($self->{_sat}{$startsec},$expected_sectors);
 
     my @minifat = unpack('V*',$raw);
-    $self->{minifat} = _unpack_chains(@minifat);
+    $self->{_minifat} = _unpack_chains(@minifat);
     return $self;
 }
 
@@ -286,7 +285,7 @@ sub _read_dir {
     my $self = shift;
     my $startsec = $self->{header}{sectDirStart};
     my $expected_sectors = $self->{header}{sectDirCount};
-    my $raw = $self->_read_satchain($self->{sat}{$startsec},$expected_sectors);
+    my $raw = $self->_read_satchain($self->{_sat}{$startsec},$expected_sectors);
 
     my $dir = {};
     for my $dirid (0..length($raw)/128-1) {
@@ -322,26 +321,28 @@ sub _read_dir {
 
         if ($entry->{type} eq 'root storage') {
             my $mini_sector_size = 2**$self->{header}{MiniSectorShift};
-            $self->{sector_mini} = Sector::SectorList->new(
+            $self->{_sector_mini} = Sector::SectorList->new(
                 $mini_sector_size,      
-                $self->{sector},
-                $self->{sat}{$entry->{sector}}
+                $self->{_sector},
+                $self->{_sat}{$entry->{sector}}
             );
         } else {
             my $sector;
             my $sat;
             if ($entry->{size} < $self->{header}{MiniSectorCutoff}) {
-                $sector = $self->{sector_mini};
-                $sat = $self->{minifat};
+                $sector = $self->{_sector_mini};
+                $sat = $self->{_minifat};
             } else {
-                $sector = $self->{sector};
-                $sat = $self->{sat};
+                $sector = $self->{_sector};
+                $sat = $self->{_sat};
             }
             $entry->{file_sector} = Sector::SectorList->new(
                 512,
                 $sector,
                 $sat->{$entry->{sector}}
             );
+
+            #$entry->{file_data} = $entry->{file_sector}->readall();
         }
     }
 

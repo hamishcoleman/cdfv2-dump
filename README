@@ -1,0 +1,6 @@
+See https://en.wikipedia.org/wiki/Compound_File_Binary_Format for a full
+description of this file format.
+
+I wanted a way to dump some malware without opening it, so I needed a parser
+and dumper for this format.
+

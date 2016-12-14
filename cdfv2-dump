@@ -11,6 +11,8 @@ use strict;
 
 use IO::File;
 use UUID ':all';
+use Encode qw(decode encode);
+
 
 sub new {
     my $class = shift;
@@ -20,6 +22,9 @@ sub new {
     my $filename = shift;
     $self->_open($filename) || return undef;
     $self->_validate() || return undef;
+    $self->_read_sat() || return undef;
+    $self->_read_minifat() || return undef;
+    $self->_read_dir() || return undef;
 
     return $self;
 }
@@ -42,8 +47,23 @@ sub _read {
     $fh->seek($offset,0) || return undef;
     my $buf;
     $fh->read($buf,$size) || return undef;
-    $self->{_reads}{$offset} = "\n".HC::Common::hexdump(\$buf);
+    $self->{_read}{hexify($offset)} = "\n".HC::Common::hexdump(\$buf);
     return $buf;
+}
+
+sub _sector2offset {
+    my $self = shift;
+    my $sector = shift;
+    return 512 + $sector * $self->{sector_size};
+}
+
+sub _read_sector {
+    my $self = shift;
+    my $sector = shift;
+    return $self->_read(
+        $self->_sector2offset($sector),
+        $self->{sector_size}
+    );
 }
 
 # turn an int into a hex
@@ -71,12 +91,120 @@ sub _validate {
     $header->{ByteOrder} = hexify($header->{ByteOrder});
     unparse($header->{_clsid},$header->{_clsid});
 
+    $self->{sector_size} = 2**$header->{SectorShift};
+
     $header->{Sig} eq '0xd0cf11e0a1b11ae1' || die("Bad Sig");
     $header->{ByteOrder} eq '0xfffe' || die("Unsupported Byteorder");
     $header->{DllVersion} == 3 || die("Unsupported Version");
     $header->{sectDirCount} == 0 || die("sectDirCount MBZ");
     $header->{sectDifCount} == 0 || die("Unsupported sectDifCount");
     $header->{sectDifStart} == 0xFFFFFFFE || die("Unsupported larger Dif");
+    return $self;
+}
+
+sub _read_sat {
+    my $self = shift;
+    my $sat;
+
+    for my $secno (@{$self->{header}{sectFat}}) {
+        $sat .= $self->_read_sector($secno);
+    }
+    my @sat = unpack('V*',$sat);
+    $self->{sat_raw} = \@sat;
+
+    #$self->_sat_unpack() || return undef;
+
+    return $self;
+}
+
+#sub _sat_unpack {
+#    my $self = shift;
+#    my @sat_raw = @{$self->{sat_raw}};
+#    my @visited;
+#    my $sat = {};
+#    $self->{sat} = $sat;
+#
+#    my $start_sec = 0;
+#    my $current_sec = $start_sec;
+#
+#    if ($visited[$current_sec]) {
+#        $start_sec =
+#    push @{$sat->{$start_sec}}, $current_sec;
+#    $visited[$current_sec] = $start_sec;
+#    if ($sec_raw[$current_sec] >= 0xfffffffc)
+#
+#}
+
+sub _read_satchain {
+    my $self = shift;
+    my $startsec = shift;
+    my $expected_sectors = shift;
+
+    my $buf;
+    my $count = 0;
+    my $sector = $startsec;
+    while($sector < 0xfffffffc) {
+        $buf .= $self->_read_sector($sector);
+        $sector = $self->{sat_raw}[$sector];
+        $count ++;
+    }
+
+    if ($expected_sectors) {
+        $count == $expected_sectors || die("Unexpected size");
+    }
+    return $buf;
+}
+
+sub _read_minifat {
+    my $self = shift;
+    my $startsec = $self->{header}{sectMiniFatStart};
+    my $expected_sectors = $self->{header}{sectMiniFatCount};
+    my $raw = $self->_read_satchain($startsec,$expected_sectors);
+
+    my @minifat = unpack('V*',$raw);
+    $self->{minifat_raw} = \@minifat;
+    return $self;
+}
+
+sub _read_dir {
+    my $self = shift;
+    my $startsec = $self->{header}{sectDirStart};
+    my $expected_sectors = $self->{header}{sectDirCount};
+    my $raw = $self->_read_satchain($startsec,$expected_sectors);
+
+    my $dir = {};
+    for my $dirid (0..length($raw)/128-1) {
+        my $buf = substr($raw,$dirid*128,128);
+        my $entry;
+
+        my @fields = qw(name namelen type color
+            dirid_left dirid_right dirid_root
+            uuid flags
+            time_create time_modify
+            sector size unused
+        );
+        my @values = unpack("a64vCCVVVa16VQ>Q>VVV",$buf);
+        map { $entry->{$fields[$_]} = $values[$_] } (0..scalar(@fields)-1);
+
+        $entry->{name} = substr($entry->{name},0,$entry->{namelen}-2);
+        $entry->{name} = decode('UTF-16LE',$entry->{name});
+
+             if ($entry->{color} == 0) { $entry->{color} = 'red';
+        } elsif ($entry->{color} == 1) { $entry->{color} = 'black';
+        } else { die("bad dir entry color"); }
+
+             if ($entry->{type} == 0) { $entry->{type} = 'empty';
+        } elsif ($entry->{type} == 1) { $entry->{type} = 'user storage';
+        } elsif ($entry->{type} == 2) { $entry->{type} = 'user stream';
+        } elsif ($entry->{type} == 3) { $entry->{type} = 'lockbytes';
+        } elsif ($entry->{type} == 4) { $entry->{type} = 'property';
+        } elsif ($entry->{type} == 5) { $entry->{type} = 'root storage';
+        } else { die("bad dir entry type"); }
+
+        #unparse($entry->{uuid},$entry->{uuid});
+        $self->{dir}{$dirid} = $entry;
+    }
+
     return $self;
 }
 
@@ -103,7 +231,7 @@ my @option_list = (
     "verbose|v+",
 );
 
-sub main() { 
+sub main() {
     HC::Common::do_options($option,@option_list);
     if (defined($option->{help})) {
         return

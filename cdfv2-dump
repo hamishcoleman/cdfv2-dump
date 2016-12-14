@@ -1,0 +1,114 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+#
+# Quick and dirty dumper for the CDFv2 file format
+#
+
+package CDF_File;
+use warnings;
+use strict;
+
+use IO::File;
+use UUID ':all';
+
+sub new {
+    my $class = shift;
+    my $self = {};
+    bless $self, $class;
+
+    my $filename = shift;
+    $self->_open($filename) || return undef;
+    $self->_validate() || return undef;
+
+    return $self;
+}
+
+sub _open {
+    my $self = shift;
+    my $filename = shift;
+
+    my $fh = IO::File->new($filename,"r");
+    return undef if (!defined($fh));
+    $self->{fh} = $fh;
+    return $self;
+}
+
+sub _read {
+    my $self = shift;
+    my $offset = shift;
+    my $size = shift;
+    my $fh = $self->{fh} || return undef;
+    $fh->seek($offset,0) || return undef;
+    my $buf;
+    $fh->read($buf,$size) || return undef;
+    $self->{_reads}{$offset} = "\n".HC::Common::hexdump(\$buf);
+    return $buf;
+}
+
+# turn an int into a hex
+sub hexify { return sprintf("0x%02x",shift); }
+
+sub _validate {
+    my $self = shift;
+    my $buf = $self->_read(0,512);
+    my $header;
+
+    my @fields = qw(Sig _clsid MinorVersion DllVersion ByteOrder
+        SectorShift MiniSectorShift Reserved Reserved1 sectDirCount
+        sectFatCount sectDirStart _signature MiniSectorCutoff
+        sectMiniFatStart sectMiniFatCount sectDifStart sectDifCount
+        sectFat
+    );
+    my @values = unpack("Q>a16vvvvvvVVVVVVVVVVa*",$buf);
+    map { $header->{$fields[$_]} = $values[$_] } (0..scalar(@fields)-1);
+    $self->{header} = $header;
+
+    my @sectors = unpack("V".$header->{sectFatCount},$header->{sectFat});
+    $header->{sectFat} = \@sectors;
+
+    $header->{Sig} = hexify($header->{Sig});
+    $header->{ByteOrder} = hexify($header->{ByteOrder});
+    unparse($header->{_clsid},$header->{_clsid});
+
+    $header->{Sig} eq '0xd0cf11e0a1b11ae1' || die("Bad Sig");
+    $header->{ByteOrder} eq '0xfffe' || die("Unsupported Byteorder");
+    $header->{DllVersion} == 3 || die("Unsupported Version");
+    $header->{sectDirCount} == 0 || die("sectDirCount MBZ");
+    $header->{sectDifCount} == 0 || die("Unsupported sectDifCount");
+    $header->{sectDifStart} == 0xFFFFFFFE || die("Unsupported larger Dif");
+    return $self;
+}
+
+package main;
+use warnings;
+use strict;
+
+# allow the libs to be in the bin dir
+use FindBin;
+use lib "$FindBin::RealBin/lib";
+
+use Data::Dumper;
+$Data::Dumper::Indent = 1;
+$Data::Dumper::Sortkeys = 1;
+$Data::Dumper::Quotekeys = 0;
+
+
+use HC::Common;
+
+my $option = {
+    verbose  => 0,
+};
+my @option_list = (
+    "verbose|v+",
+);
+
+sub main() { 
+    HC::Common::do_options($option,@option_list);
+    if (defined($option->{help})) {
+        return
+    }
+    my $file = CDF_File->new($ARGV[0]);
+    print Dumper($file);
+}
+main();

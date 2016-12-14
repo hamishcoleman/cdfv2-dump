@@ -19,7 +19,7 @@ sub new {
 
     $self->{fh} = shift || return undef;
     $self->{start_offset} = shift || return undef;
-    $self->{sector_size} = shift || return undef;
+    $self->{sector_size} = (shift)+0 || return undef;
 
     return $self;
 }
@@ -29,9 +29,80 @@ sub read {
     my $sector = shift;
 
     my $buf;
-    my $filepos = $self->{start_offset} + $sector * $self->{sector_size};
+    my $size = $self->{sector_size};
+    my $filepos = $self->{start_offset} + $sector * $size;
     $self->{fh}->seek($filepos,0) || return undef;
-    $self->{fh}->read($buf,$self->{sector_size}) || return undef;
+    $self->{fh}->read($buf,$size) || return undef;
+    return $buf;
+}
+
+sub max_sector {
+    my $self = shift;
+
+    $self->{fh}->seek(0,2) || return undef;
+    my $filesize = $self->{fh}->tell();
+
+    my $sector_size = $self->{sector_size};
+
+    return int((($filesize-1)+$sector_size)/$sector_size);
+}
+
+package Sector::SectorList;
+use warnings;
+use strict;
+#
+# Provide a sector interface to a list of sectors in an underlying Sector object
+
+sub new {
+    my $class = shift;
+    my $self = {};
+    bless $self, $class;
+
+    $self->{sector_size} = shift || return undef;
+    $self->{sector} = shift || return undef;
+    $self->{list} = shift || return undef;
+
+    return $self;
+}
+
+sub read {
+    my $self = shift;
+    my $sector = shift;
+
+    my $size = $self->{sector_size};
+    my $parent_size = $self->{sector}{sector_size};
+    my $parent_sector = int($sector*$size / $parent_size);
+    my $parent_offset = $sector*$size % $parent_size;
+
+    # lookup the correct sector from the list
+    $parent_sector = $self->{list}[$parent_sector];
+    if (!defined($parent_sector)) {
+        return undef;
+    }
+
+    my $buf = $self->{sector}->read($parent_sector) || return undef;
+    return substr($buf,$parent_offset,$size);
+}
+
+sub max_sector {
+    my $self = shift;
+
+    my $sector_size = $self->{sector_size};
+    my $parent_bytes = $self->{sector}{sector_size}*scalar(@{$self->{list}});
+
+    my $max_sector = int((($parent_bytes-1)+$sector_size)/$sector_size);
+
+    return $max_sector;
+}
+
+sub readall {
+    my $self = shift;
+
+    my $buf;
+    my $count = $self->max_sector();
+    for my $secno (0..$count-1) {
+        $buf .= $self->read($secno);
+    }
     return $buf;
 }
 
@@ -121,57 +192,93 @@ sub _read_sat {
     my @sat = unpack('V*',$sat);
     $self->{sat_raw} = \@sat;
 
-    #$self->_sat_unpack() || return undef;
+    $self->{sat} = _unpack_chains(@sat);
 
     return $self;
 }
 
-#sub _sat_unpack {
-#    my $self = shift;
-#    my @sat_raw = @{$self->{sat_raw}};
-#    my @visited;
-#    my $sat = {};
-#    $self->{sat} = $sat;
-#
-#    my $start_sec = 0;
-#    my $current_sec = $start_sec;
-#
-#    if ($visited[$current_sec]) {
-#        $start_sec =
-#    push @{$sat->{$start_sec}}, $current_sec;
-#    $visited[$current_sec] = $start_sec;
-#    if ($sec_raw[$current_sec] >= 0xfffffffc)
-#
-#}
+sub _unpack_chains {
+    my @cluster_raw = @_;
+
+    my @prev;   # back-chain list ref
+    my %tails;  # list of seen ending sectors
+    my $cluster; # place to accumulate the table of chains
+    my @visited; # list of sectors added to cluster
+
+    my $errors = 0;
+    for my $sector (0..scalar(@cluster_raw)-1) {
+        my $next = $cluster_raw[$sector];
+
+        if ($next < 0xfffffffc) {
+            if (defined($prev[$next])) {
+                $errors++;
+            } else {
+                $prev[$next] = $sector;
+            }
+        } elsif ($next == 0xfffffffe) {
+            # keep track of all the ends we found
+            $tails{$sector}++;
+        } elsif ($next == 0xffffffff) {
+            push @{$cluster->{FREESECT}},$sector;
+            $visited[$sector]++;
+        } elsif ($next == 0xfffffffd) {
+            push @{$cluster->{FATSECT}},$sector;
+            $visited[$sector]++;
+        } elsif ($next == 0xfffffffc) {
+            push @{$cluster->{DIFSECT}},$sector;
+            $visited[$sector]++;
+        }
+    }
+
+    for my $tail (keys(%tails)) {
+        my @this = $tail+0;
+        $visited[$tail]++;
+        my $sector = $tail;
+        while (defined($prev[$sector])) {
+            $sector = $prev[$sector];
+            unshift @this,$sector;
+            $visited[$sector]++;
+        }
+        $cluster->{$sector} = \@this;
+    }
+
+    for my $sector (0..scalar(@cluster_raw)-1) {
+        if (!$visited[$sector]) {
+            $errors++;
+            push @{$cluster->{UNVISITED}}, $sector;
+        }
+    }
+
+    if ($errors) {
+        warn("Errors found checking cluster chain");
+    }
+
+    return $cluster;
+}
 
 sub _read_satchain {
     my $self = shift;
-    my $startsec = shift;
+    my $sector_list = shift;
     my $expected_sectors = shift;
 
-    my $buf;
-    my $count = 0;
-    my $sector = $startsec;
-    while($sector < 0xfffffffc) {
-        $buf .= $self->{sector}->read($sector);
-        $sector = $self->{sat_raw}[$sector];
-        $count ++;
+    if ($expected_sectors && $expected_sectors != scalar(@{$sector_list})) {
+        die("Unexpected size");
     }
 
-    if ($expected_sectors) {
-        $count == $expected_sectors || die("Unexpected size");
-    }
-    return $buf;
+    my $sector_size = $self->{sector}{sector_size};
+    my $sector = Sector::SectorList->new($sector_size,$self->{sector},$sector_list);
+
+    return $sector->readall();
 }
 
 sub _read_minifat {
     my $self = shift;
     my $startsec = $self->{header}{sectMiniFatStart};
     my $expected_sectors = $self->{header}{sectMiniFatCount};
-    my $raw = $self->_read_satchain($startsec,$expected_sectors);
+    my $raw = $self->_read_satchain($self->{sat}{$startsec},$expected_sectors);
 
     my @minifat = unpack('V*',$raw);
-    $self->{minifat_raw} = \@minifat;
+    $self->{minifat} = _unpack_chains(@minifat);
     return $self;
 }
 
@@ -179,7 +286,7 @@ sub _read_dir {
     my $self = shift;
     my $startsec = $self->{header}{sectDirStart};
     my $expected_sectors = $self->{header}{sectDirCount};
-    my $raw = $self->_read_satchain($startsec,$expected_sectors);
+    my $raw = $self->_read_satchain($self->{sat}{$startsec},$expected_sectors);
 
     my $dir = {};
     for my $dirid (0..length($raw)/128-1) {
@@ -212,6 +319,30 @@ sub _read_dir {
 
         #unparse($entry->{uuid},$entry->{uuid});
         $self->{dir}{$dirid} = $entry;
+
+        if ($entry->{type} eq 'root storage') {
+            my $mini_sector_size = 2**$self->{header}{MiniSectorShift};
+            $self->{sector_mini} = Sector::SectorList->new(
+                $mini_sector_size,      
+                $self->{sector},
+                $self->{sat}{$entry->{sector}}
+            );
+        } else {
+            my $sector;
+            my $sat;
+            if ($entry->{size} < $self->{header}{MiniSectorCutoff}) {
+                $sector = $self->{sector_mini};
+                $sat = $self->{minifat};
+            } else {
+                $sector = $self->{sector};
+                $sat = $self->{sat};
+            }
+            $entry->{file_sector} = Sector::SectorList->new(
+                512,
+                $sector,
+                $sat->{$entry->{sector}}
+            );
+        }
     }
 
     return $self;

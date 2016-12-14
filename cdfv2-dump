@@ -5,6 +5,36 @@ use strict;
 # Quick and dirty dumper for the CDFv2 file format
 #
 
+package Sector::FH;
+use warnings;
+use strict;
+#
+# Provide a sector interface to a filehandle
+# filepos = $offset + sector*$sector_size
+
+sub new {
+    my $class = shift;
+    my $self = {};
+    bless $self, $class;
+
+    $self->{fh} = shift || return undef;
+    $self->{start_offset} = shift || return undef;
+    $self->{sector_size} = shift || return undef;
+
+    return $self;
+}
+
+sub read {
+    my $self = shift;
+    my $sector = shift;
+
+    my $buf;
+    my $filepos = $self->{start_offset} + $sector * $self->{sector_size};
+    $self->{fh}->seek($filepos,0) || return undef;
+    $self->{fh}->read($buf,$self->{sector_size}) || return undef;
+    return $buf;
+}
+
 package CDF_File;
 use warnings;
 use strict;
@@ -39,39 +69,16 @@ sub _open {
     return $self;
 }
 
-sub _read {
-    my $self = shift;
-    my $offset = shift;
-    my $size = shift;
-    my $fh = $self->{fh} || return undef;
-    $fh->seek($offset,0) || return undef;
-    my $buf;
-    $fh->read($buf,$size) || return undef;
-    $self->{_read}{hexify($offset)} = "\n".HC::Common::hexdump(\$buf);
-    return $buf;
-}
-
-sub _sector2offset {
-    my $self = shift;
-    my $sector = shift;
-    return 512 + $sector * $self->{sector_size};
-}
-
-sub _read_sector {
-    my $self = shift;
-    my $sector = shift;
-    return $self->_read(
-        $self->_sector2offset($sector),
-        $self->{sector_size}
-    );
-}
 
 # turn an int into a hex
 sub hexify { return sprintf("0x%02x",shift); }
 
 sub _validate {
     my $self = shift;
-    my $buf = $self->_read(0,512);
+    my $buf;
+
+    $self->{fh}->read($buf,512) || return undef;
+
     my $header;
 
     my @fields = qw(Sig _clsid MinorVersion DllVersion ByteOrder
@@ -91,14 +98,16 @@ sub _validate {
     $header->{ByteOrder} = hexify($header->{ByteOrder});
     unparse($header->{_clsid},$header->{_clsid});
 
-    $self->{sector_size} = 2**$header->{SectorShift};
-
     $header->{Sig} eq '0xd0cf11e0a1b11ae1' || die("Bad Sig");
     $header->{ByteOrder} eq '0xfffe' || die("Unsupported Byteorder");
     $header->{DllVersion} == 3 || die("Unsupported Version");
     $header->{sectDirCount} == 0 || die("sectDirCount MBZ");
     $header->{sectDifCount} == 0 || die("Unsupported sectDifCount");
     $header->{sectDifStart} == 0xFFFFFFFE || die("Unsupported larger Dif");
+
+    my $sector_size = 2**$header->{SectorShift};
+    $self->{sector} = Sector::FH->new($self->{fh},512,$sector_size);
+
     return $self;
 }
 
@@ -107,7 +116,7 @@ sub _read_sat {
     my $sat;
 
     for my $secno (@{$self->{header}{sectFat}}) {
-        $sat .= $self->_read_sector($secno);
+        $sat .= $self->{sector}->read($secno);
     }
     my @sat = unpack('V*',$sat);
     $self->{sat_raw} = \@sat;
@@ -144,7 +153,7 @@ sub _read_satchain {
     my $count = 0;
     my $sector = $startsec;
     while($sector < 0xfffffffc) {
-        $buf .= $self->_read_sector($sector);
+        $buf .= $self->{sector}->read($sector);
         $sector = $self->{sat_raw}[$sector];
         $count ++;
     }

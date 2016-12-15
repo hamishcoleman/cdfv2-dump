@@ -4,3 +4,10 @@ description of this file format.
 I wanted a way to dump some malware without opening it, so I needed a parser
 and dumper for this format.
 
+TODO
+- only dumps down to the raw directory
+-- display the dir in a human readable way
+-- optionally extract the contents of some of the streams
+   (note: quick tests showed there might be a bug in the current stream reader)
+-- test on more input files
+
